@@ -4,7 +4,7 @@ import { useSocket } from '../context/SocketContext';
 import axios from 'axios';
 import './Chat.css';
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = `${import.meta.env.VITE_BACKEND_URL}/api`;
 
 const Chat = () => {
   const { user } = useAuth();
