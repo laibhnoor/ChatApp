@@ -15,86 +15,112 @@ const Conversation = require("./models/Conversation");
 const app = express();
 const server = http.createServer(app);
 
-// Socket.io setup with CORS
+
+// ✅ ALLOWED ORIGINS (LOCAL + PRODUCTION)
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:5174",
+  process.env.CLIENT_URL // Vercel URL
+];
+
+
+// ✅ SOCKET.IO SETUP (FIXED CORS)
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Socket CORS not allowed"));
+      }
+    },
     methods: ["GET", "POST"],
     credentials: true
   }
 });
 
-// Middleware
+
+// ✅ EXPRESS CORS (FIXED)
 app.use(cors({
-  origin: process.env.CLIENT_URL || "http://localhost:5173",
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("CORS not allowed"));
+    }
+  },
   credentials: true
 }));
+
 app.use(express.json());
 
-// Health check route
+
+// ✅ HEALTH CHECK
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "API is running..." });
 });
 
-// Routes
+
+// ✅ ROUTES
 app.use("/api/auth", authRoutes);
 app.use("/api", chatRoutes);
 
-// Connect DB
+
+// ✅ DATABASE
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
   .catch(err => console.log(err));
 
-// Socket.io JWT authentication middleware
+
+// ✅ SOCKET AUTH
 io.use(socketAuth);
 
-// Track online users with their socket IDs
+
+// ✅ ONLINE USERS TRACK
 const onlineUsers = new Map();
 
-// Socket.io connection handling
+
+// ✅ SOCKET CONNECTION
 io.on("connection", async (socket) => {
   console.log(`User connected: ${socket.user.username} (${socket.id})`);
 
-  // Track user's socket
   onlineUsers.set(socket.userId.toString(), socket.id);
 
-  // Update user online status
   await User.findByIdAndUpdate(socket.userId, { isOnline: true });
 
-  // Join user's personal room for receiving messages
   socket.join(socket.userId.toString());
 
-  // Broadcast user online status
   socket.broadcast.emit("user_online", {
     userId: socket.userId,
     username: socket.user.username
   });
 
-  // Join conversation rooms
+
+  // JOIN CONVERSATION
   socket.on("join_conversation", async (conversationId) => {
-    // Verify user is participant
     const conversation = await Conversation.findOne({
       _id: conversationId,
       participants: socket.userId
     });
-    
+
     if (conversation) {
       socket.join(conversationId);
       console.log(`${socket.user.username} joined conversation: ${conversationId}`);
     }
   });
 
-  // Leave conversation room
+
+  // LEAVE CONVERSATION
   socket.on("leave_conversation", (conversationId) => {
     socket.leave(conversationId);
   });
 
-  // Handle sending messages (real-time + persist)
+
+  // SEND MESSAGE
   socket.on("send_message", async (data) => {
     try {
       const { conversationId, content } = data;
 
-      // Verify user is participant
       const conversation = await Conversation.findOne({
         _id: conversationId,
         participants: socket.userId
@@ -102,7 +128,6 @@ io.on("connection", async (socket) => {
 
       if (!conversation) return;
 
-      // Save message to database
       const message = await Message.create({
         conversation: conversationId,
         sender: socket.userId,
@@ -110,11 +135,9 @@ io.on("connection", async (socket) => {
         readBy: [socket.userId]
       });
 
-      // Update conversation's last message
       conversation.lastMessage = message._id;
       await conversation.save();
 
-      // Populate sender info
       await message.populate('sender', 'username');
 
       const messageData = {
@@ -128,14 +151,12 @@ io.on("connection", async (socket) => {
         createdAt: message.createdAt
       };
 
-      // Send to all participants in the conversation room
       io.to(conversationId).emit("new_message", messageData);
 
-      // Also notify participants who might not be in the room
       conversation.participants.forEach(participantId => {
-        const oderId = participantId.toString();
-        if (oderId !== socket.userId.toString()) {
-          io.to(oderId).emit("message_notification", {
+        const otherId = participantId.toString();
+        if (otherId !== socket.userId.toString()) {
+          io.to(otherId).emit("message_notification", {
             conversationId,
             message: messageData
           });
@@ -147,7 +168,8 @@ io.on("connection", async (socket) => {
     }
   });
 
-  // Handle typing indicator
+
+  // TYPING
   socket.on("typing", (data) => {
     socket.to(data.conversationId).emit("user_typing", {
       conversationId: data.conversationId,
@@ -157,12 +179,12 @@ io.on("connection", async (socket) => {
     });
   });
 
-  // Handle marking messages as read
+
+  // MARK AS READ
   socket.on("mark_as_read", async (data) => {
     try {
       const { conversationId, messageIds } = data;
 
-      // Verify user is participant
       const conversation = await Conversation.findOne({
         _id: conversationId,
         participants: socket.userId
@@ -170,17 +192,15 @@ io.on("connection", async (socket) => {
 
       if (!conversation) return;
 
-      // Update all specified messages
       await Message.updateMany(
-        { 
+        {
           _id: { $in: messageIds },
           conversation: conversationId,
-          sender: { $ne: socket.userId } // Can't mark own messages as read
+          sender: { $ne: socket.userId }
         },
         { $addToSet: { readBy: socket.userId } }
       );
 
-      // Notify other participants about read receipts
       socket.to(conversationId).emit("messages_read", {
         conversationId,
         messageIds,
@@ -195,11 +215,15 @@ io.on("connection", async (socket) => {
     }
   });
 
-  // Handle disconnect
+
+  // DISCONNECT
   socket.on("disconnect", async () => {
     console.log(`User disconnected: ${socket.user.username}`);
+
     onlineUsers.delete(socket.userId.toString());
+
     await User.findByIdAndUpdate(socket.userId, { isOnline: false });
+
     socket.broadcast.emit("user_offline", {
       userId: socket.userId,
       username: socket.user.username
@@ -207,9 +231,11 @@ io.on("connection", async (socket) => {
   });
 });
 
-// Make io accessible to routes if needed
+
+// ✅ MAKE IO AVAILABLE
 app.set("io", io);
 
-// Start server
+
+// ✅ START SERVER
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
